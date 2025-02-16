@@ -1,0 +1,100 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+      - production
+
+jobs:
+  lint-and-audit:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pip-audit
+
+      - name: Run Linter (Ruff)
+        run: ruff check . || true  # Log but don't fail
+
+      - name: Run Dependency Audit
+        run: pip-audit || true  # Log but don't fail
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: lint-and-audit
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Log in to DockerHub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Set Image Tag
+        id: vars
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/develop" ]; then
+            echo "IMAGE_TAG=develop" >> $GITHUB_ENV
+          elif [ "${{ github.ref }}" == "refs/heads/staging" ]; then
+            echo "IMAGE_TAG=staging" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=production" >> $GITHUB_ENV
+          fi
+
+      - name: Build Docker Image
+        run: docker build -t my-app:${{ env.IMAGE_TAG }} .
+
+      - name: Run Trivy Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'my-app:${{ env.IMAGE_TAG }}'
+          format: 'table'
+          exit-code: 0  # Log findings but don't fail
+
+      - name: Push Image to DockerHub
+        run: |
+          docker tag my-app:${{ env.IMAGE_TAG }} ${{ secrets.DOCKERHUB_USERNAME }}/my-app:${{ env.IMAGE_TAG }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/my-app:${{ env.IMAGE_TAG }}
+
+  compose-validation:
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Validate Docker Compose Stack
+        run: |
+          docker-compose up -d
+          sleep 10
+          curl -f http://localhost:8000/graphql || curl -f http://localhost:8000 || exit 1
+          docker-compose down
+
+  deploy-production:
+    if: github.ref == 'refs/heads/production'
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Log in to AWS ECR
+        run: aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REPOSITORY }}
+
+      - name: Tag & Push to AWS ECR
+        run: |
+          docker tag my-app:production ${{ secrets.ECR_REPOSITORY }}:latest
+          docker push ${{ secrets.ECR_REPOSITORY }}:latest
+
+      - name: Deploy to AWS (ECS/Fargate)
+        run: |
+          aws ecs update-service --cluster my-cluster --service my-service --force-new-deployment

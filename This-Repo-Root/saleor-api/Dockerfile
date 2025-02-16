@@ -41,4 +41,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8000
 
 # Step 10: Start the Application
-CMD ["gunicorn", "--bind", ":8000", "--workers", "4", "--worker-class", "saleor.asgi.gunicorn_worker.UvicornWorker", "saleor.asgi:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "saleor.wsgi:application"]
+
