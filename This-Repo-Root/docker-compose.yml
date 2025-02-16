@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # Step 2: Saleor API (Backend)
+  api:
+    build:
+      context: ./saleor-api
+      dockerfile: Dockerfile
+    container_name: saleor-api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+      - jaeger
+    volumes:
+      - saleor-media:/app/media
+    environment:
+      - ALLOWED_HOSTS=localhost,api,dashboard
+      - JAEGER_AGENT_HOST=jaeger
+      - DATABASE_URL=postgres://saleor:saleorpassword@db:5432/saleor
+    networks:
+      - saleor-backend-tier
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Step 3: Saleor Dashboard (Admin UI)
+  dashboard:
+    build:
+      context: ./saleor-dashboard
+      dockerfile: Dockerfile
+    container_name: saleor-dashboard
+    ports:
+      - "9000:80"
+    depends_on:
+      - api
+    networks:
+      - saleor-backend-tier
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Step 4: PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: saleor-db
+    ports:
+      - "5432:5432"
+    volumes:
+      - saleor-db:/var/lib/postgresql/data
+      - ./database/init/replica_user.sql:/docker-entrypoint-initdb.d/replica_user.sql
+    environment:
+      - POSTGRES_USER=saleor
+      - POSTGRES_PASSWORD=saleorpassword
+      - POSTGRES_DB=saleor
+    networks:
+      - saleor-backend-tier
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U saleor"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Step 5: Redis (Cache & Celery Queue)
+  redis:
+    image: redis:7.0-alpine
+    container_name: saleor-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - saleor-redis:/data
+    networks:
+      - saleor-backend-tier
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Step 6: Jaeger (Tracing & Monitoring)
+  jaeger:
+    image: jaegertracing/all-in-one:1.20.0
+    container_name: saleor-jaeger
+    ports:
+      - "16686:16686"  # Web UI
+      - "14268:14268"  # HTTP API
+      - "6831:6831/udp"  # UDP Tracing
+    networks:
+      - saleor-backend-tier
+    restart: unless-stopped
+
+  # Step 7: Mailpit (Mock Email Server)
+  mailpit:
+    image: axllent/mailpit
+    container_name: saleor-mailpit
+    ports:
+      - "8025:8025"  # Web UI
+      - "1025:1025"  # SMTP Port
+    networks:
+      - saleor-backend-tier
+    restart: unless-stopped
+
+# Step 8: Define Volumes (Persistent Storage)
+volumes:
+  saleor-db:
+  saleor-redis:
+  saleor-media:
+
+# Step 9: Configure Network (Service Communication)
+networks:
+  saleor-backend-tier:
+    driver: bridge
